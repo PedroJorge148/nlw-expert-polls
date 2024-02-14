@@ -3,6 +3,7 @@ import { prisma } from '../../lib/prisma'
 import z from 'zod'
 import { randomUUID } from 'node:crypto'
 import { redis } from '../../lib/redis'
+import { voting } from '../../utils/voting-pub-sub'
 
 export async function voteOnPoll(app: FastifyInstance) {
   app.post('/polls/:pollId/votes', async (request, reply) => {
@@ -20,7 +21,7 @@ export async function voteOnPoll(app: FastifyInstance) {
     let { sessionId } = request.cookies
 
     if (sessionId) {
-      const usePreviousVoteOnPoll = await prisma.vote.findUnique({
+      const userPreviousVoteOnPoll = await prisma.vote.findUnique({
         where: {
           sessionId_pollId: {
             sessionId,
@@ -30,17 +31,26 @@ export async function voteOnPoll(app: FastifyInstance) {
       })
 
       if (
-        usePreviousVoteOnPoll &&
-        usePreviousVoteOnPoll.pollOptionId !== pollOptionId
+        userPreviousVoteOnPoll &&
+        userPreviousVoteOnPoll.pollOptionId !== pollOptionId
       ) {
         await prisma.vote.delete({
           where: {
-            id: usePreviousVoteOnPoll.id,
+            id: userPreviousVoteOnPoll.id,
           },
         })
 
-        await redis.zincrby(pollId, -1, usePreviousVoteOnPoll.pollOptionId)
-      } else if (usePreviousVoteOnPoll) {
+        const votes = await redis.zincrby(
+          pollId,
+          -1,
+          userPreviousVoteOnPoll.pollOptionId,
+        )
+
+        voting.publish(pollId, {
+          pollOptionId,
+          votes: Number(votes),
+        })
+      } else if (userPreviousVoteOnPoll) {
         return reply
           .status(409)
           .send({ message: 'You already voted on this poll.' })
@@ -66,7 +76,12 @@ export async function voteOnPoll(app: FastifyInstance) {
       },
     })
 
-    await redis.zincrby(pollId, 1, pollOptionId)
+    const votes = await redis.zincrby(pollId, 1, pollOptionId)
+
+    voting.publish(pollId, {
+      pollOptionId,
+      votes: Number(votes),
+    })
 
     return reply.status(201).send()
   })
